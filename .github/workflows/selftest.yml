@@ -1,0 +1,42 @@
+# Проверка самого прибора на стороне GitHub.
+#
+# ЗАЧЕМ ИМЕННО selftest. Прибор объявляет, что умеет краснеть, — и здесь это
+# доказывается: он подкладывает сам себе одиннадцать порч и обязан поймать все.
+# Не поймал хоть одну — сборка красная, и пользоваться таким прибором нельзя.
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Синтаксис
+        run: |
+          python3 -m py_compile proverka proverka-klyuchi proverka-vosstanovlenie
+          bash -n proverka-hook-push
+
+      - name: Прибор обязан поймать ВСЕ подложенные порчи
+        run: |
+          set -o pipefail
+          python3 proverka selftest 2>&1 | tee /tmp/selftest.log
+
+      # Код возврата 0 сам по себе ничего не значит: он же бывает и при нуле
+      # запущенных проверок. Поэтому смотрим на ЧИСЛО пойманных порч.
+      - name: Убедиться, что порчи реально подкладывались
+        run: |
+          n=$(grep -c '\[поймал\]' /tmp/selftest.log || true)
+          echo "поймано порч: $n"
+          if [ "${n:-0}" -lt 11 ]; then
+            echo "::error::Поймано ${n:-0} порч из 11. Прибор ослеп."
+            exit 1
+          fi

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Турникет на отправке. Ставится ссылкой в .git/hooks/pre-push.
+#
+# ⚠️ Имена переменных ТОЛЬКО латиницей. Первая версия была с кириллицей —
+# bash такие имена не принимает, хук падал на первой строке, и сломанный код
+# уезжал молча. Заслон, отказывающий тихо, хуже отсутствующего.
+#
+# Обходится осознанно: git push --no-verify — и это останется видно.
+#
+# ДВЕ ЗАСТАВЫ, И ПОРЯДОК ВАЖЕН:
+#   1. СЕКРЕТЫ — всегда, в любом хранилище.
+#   2. ПРОВЕРКИ — только там, где они заведены (есть КАЧЕСТВО.yml).
+# Секреты идут ПЕРВЫМИ и НЕ зависят от того, заведены ли проверки: хранилище без
+# проверок утекает ключом ровно так же, как хранилище с ними. Прежняя версия
+# выходила раньше по «нет КАЧЕСТВО.yml» — и такой репозиторий не был прикрыт
+# ничем.
+set -u
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# ═══ ЗАСТАВА 1: СЕКРЕТЫ ═══════════════════════════════════════════════════
+# Проверено 15.08 на подложных ключах: встроенные правила gitleaks ловят 2 из 6,
+# а пропускают ровно то, что у нас утекало на деле — токен телеграм-бота, ключ
+# Anthropic, ключ ElevenLabs и строку подключения к базе с паролем внутри.
+# Поэтому свой свод правил тут обязателен, «из коробки» недостаточно.
+gitleaks_bin=~/.local/bin/gitleaks
+gitleaks_cfg=~/.claude/gitleaks-arti.toml
+
+secrets_check() {
+  # ЗАКРЫТО ПРИ ПОЛОМКЕ. Нет прибора или свода правил — отправку НЕ пропускаем.
+  # Открыться при поломке значит тихо выпустить ключ; это тот самый молчаливый
+  # зелёный, ради которого всё и затевалось. Обход остаётся один и видимый.
+  if [ ! -x "$gitleaks_bin" ]; then
+    echo "🔴 Заслон на секреты не может отработать: нет $gitleaks_bin"
+    echo "   Поставить обратно или осознанно обойти: git push --no-verify"
+    return 1
+  fi
+  if [ ! -f "$gitleaks_cfg" ]; then
+    echo "🔴 Заслон на секреты не может отработать: нет свода правил $gitleaks_cfg"
+    echo "   Вернуть файл или осознанно обойти: git push --no-verify"
+    return 1
+  fi
+
+  local zero_re='^0*$'
+  local found=0
+  local report
+  report="$(mktemp -t gitleaks-push-XXXXXX.json)"
+
+  # Протокол pre-push: на входе строки «<своя ветка> <свой sha> <там ветка> <там sha>».
+  while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -z "${local_sha:-}" ] && continue
+    # Удаление ветки — отправлять нечего.
+    if printf '%s' "$local_sha" | grep -qE "$zero_re"; then continue; fi
+
+    local range
+    if printf '%s' "${remote_sha:-0}" | grep -qE "$zero_re"; then
+      # Ветки там ещё нет: берём то, чего нет ни в одной отслеживаемой ветке.
+      range="$local_sha --not --remotes"
+    else
+      range="$remote_sha..$local_sha"
+    fi
+
+    # --redact: значения ключей НЕ печатаются никогда, только где и какое правило.
+    timeout 180 "$gitleaks_bin" detect \
+      --source "$root" --config "$gitleaks_cfg" \
+      --log-opts "$range" --redact --no-banner \
+      --report-format json --report-path "$report" >/dev/null 2>&1
+    local rc=$?
+
+    if [ "$rc" = "124" ]; then
+      echo "🔴 Заслон на секреты не уложился в 3 минуты на $local_ref — отправка остановлена"
+      rm -f "$report"; return 1
+    fi
+
+    if [ -s "$report" ]; then
+      local n
+      n="$(python3 -c "import json,sys;print(len(json.load(open('$report'))))" 2>/dev/null || echo 0)"
+      if [ "${n:-0}" -gt 0 ]; then
+        found=$((found + n))
+        echo "🔴 НАЙДЕНЫ СЕКРЕТЫ в том, что отправляется ($local_ref): $n шт."
+        python3 - "$report" <<'PY' 2>/dev/null
+import json, sys
+for f in json.load(open(sys.argv[1]))[:10]:
+    print(f"     · {f.get('RuleID','?')} — {f.get('File','?')}:{f.get('StartLine','?')}"
+          f" (коммит {str(f.get('Commit',''))[:8]})")
+PY
+      fi
+    fi
+  done
+
+  rm -f "$report"
+  [ "$found" -gt 0 ] && return 1
+  return 0
+}
+
+if ! secrets_check; then
+  echo "❌ Отправка остановлена: заслон на секреты."
+  echo "   Ключ убрать из ИСТОРИИ, а не только из файла — иначе он уедет всё равно."
+  echo "   Осознанный обход: git push --no-verify"
+  exit 1
+fi
+
+# ═══ ЗАСТАВА 2: ПРОВЕРКИ ══════════════════════════════════════════════════
+bin=~/.local/bin/proverka
+[ -x "$bin" ] || { echo "турникет: прибора нет — пропускаю"; exit 0; }
+[ -f "$root/КАЧЕСТВО.yml" ] || exit 0   # проверка не заведена — не мешаем
+
+"$bin" gate "$root"
+code=$?
+if [ "$code" = "1" ]; then
+  echo "❌ Отправка остановлена турникетом. Обойти осознанно: git push --no-verify"
+  exit 1
+fi
+if [ "$code" != "0" ] && [ "$code" != "2" ]; then
+  echo "⚠️ турникет ответил непонятно (код $code) — пропускаю, но это надо посмотреть"
+fi
+exit 0
