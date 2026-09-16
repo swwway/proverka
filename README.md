@@ -93,7 +93,7 @@ $ proverka check ~/projects/мой-проект
 Нужен Python 3.8+ и git. Больше ничего обязательного.
 
 ```bash
-git clone https://github.com/Artithea/proverka.git
+git clone https://github.com/swwway/proverka.git
 cd proverka
 mkdir -p ~/.local/bin
 cp proverka proverka-hook-push proverka-klyuchi proverka-vosstanovlenie ~/.local/bin/
