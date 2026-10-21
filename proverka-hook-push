@@ -26,6 +26,14 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 gitleaks_bin=~/.local/bin/gitleaks
 gitleaks_cfg=~/.claude/gitleaks-arti.toml
 
+# Предел в 3 минуты: timeout — GNU, на Mac его нет (у Homebrew coreutils — gtimeout).
+# Нет ни того ни другого — без предела, но не мимо проверки.
+t180() {
+  if command -v timeout >/dev/null 2>&1; then timeout 180 "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout 180 "$@"
+  else "$@"; fi
+}
+
 secrets_check() {
   # ЗАКРЫТО ПРИ ПОЛОМКЕ. Нет прибора или свода правил — отправку НЕ пропускаем.
   # Открыться при поломке значит тихо выпустить ключ; это тот самый молчаливый
@@ -61,7 +69,8 @@ secrets_check() {
     fi
 
     # --redact: значения ключей НЕ печатаются никогда, только где и какое правило.
-    timeout 180 "$gitleaks_bin" detect \
+    : > "$report"
+    t180 "$gitleaks_bin" detect \
       --source "$root" --config "$gitleaks_cfg" \
       --log-opts "$range" --redact --no-banner \
       --report-format json --report-path "$report" >/dev/null 2>&1
@@ -72,19 +81,28 @@ secrets_check() {
       rm -f "$report"; return 1
     fi
 
+    local n=0
     if [ -s "$report" ]; then
-      local n
       n="$(python3 -c "import json,sys;print(len(json.load(open('$report'))))" 2>/dev/null || echo 0)"
-      if [ "${n:-0}" -gt 0 ]; then
-        found=$((found + n))
-        echo "🔴 НАЙДЕНЫ СЕКРЕТЫ в том, что отправляется ($local_ref): $n шт."
-        python3 - "$report" <<'PY' 2>/dev/null
+    fi
+    # gitleaks: 0 — чисто, 1 — найдено. Любой другой код, как и 1 без находок
+    # в отчёте, — прибор не отработал (на Mac так падал `timeout`: кода 127
+    # никто не разбирал, и отправка уходила как чистая). Закрыто при поломке.
+    if [ "$rc" != "0" ] && { [ "$rc" != "1" ] || [ "${n:-0}" -le 0 ]; }; then
+      echo "🔴 Заслон на секреты не отработал на $local_ref (gitleaks, код $rc) — отправка остановлена"
+      echo "   Проверить руками: $gitleaks_bin detect --source \"$root\" --config $gitleaks_cfg; обход — git push --no-verify"
+      rm -f "$report"; return 1
+    fi
+
+    if [ "${n:-0}" -gt 0 ]; then
+      found=$((found + n))
+      echo "🔴 НАЙДЕНЫ СЕКРЕТЫ в том, что отправляется ($local_ref): $n шт."
+      python3 - "$report" <<'PY' 2>/dev/null
 import json, sys
 for f in json.load(open(sys.argv[1]))[:10]:
     print(f"     · {f.get('RuleID','?')} — {f.get('File','?')}:{f.get('StartLine','?')}"
           f" (коммит {str(f.get('Commit',''))[:8]})")
 PY
-      fi
     fi
   done
 

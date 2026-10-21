@@ -134,8 +134,9 @@ def развернуть(база, путь):
     # ВИД КОНВЕЙЕРА ВАЖЕН. Через `stdin=PIPE` + ручное закрытие получается
     # «flush of closed file»: communicate() пытается дослать во вход, который мы
     # уже закрыли. Проверено 15.08 — падало на первой же базе. Правильно наоборот:
-    # труба принадлежит zcat, а pg_restore берёт её как свой вход.
-    распаковка = subprocess.Popen(["zcat", путь], stdout=subprocess.PIPE,
+    # труба принадлежит распаковке, а pg_restore берёт её как свой вход.
+    # gzip -dc, а не zcat: zcat на старых macOS ждёт .Z и на .gz отказывает.
+    распаковка = subprocess.Popen(["gzip", "-dc", путь], stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL)
     развёртка = subprocess.Popen(
         ["docker", "exec", "-i", СТЕНД, "pg_restore", "-U", "drill", "-d", база,
@@ -176,7 +177,7 @@ def дамп_пуст(путь):
     Потерю данных это НЕ прячет: если у базы РАНЬШЕ были таблицы, а теперь ноль,
     краснеет проверка усушки — она смотрит на эталон прошлого прогона.
     """
-    расп = subprocess.Popen(["zcat", путь], stdout=subprocess.PIPE,
+    расп = subprocess.Popen(["gzip", "-dc", путь], stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     опись = subprocess.Popen(["docker", "exec", "-i", СТЕНД, "pg_restore", "-l"],
                              stdin=расп.stdout, stdout=subprocess.PIPE,
